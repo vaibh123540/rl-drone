@@ -34,7 +34,7 @@ MAX_STEPS = 1000
 
 # counts (fixed-size arrays for speed)
 N_OBS = 4
-N_EN = 5
+N_EN = 4
 N_FR = 3
 
 # --- COLORS ---
