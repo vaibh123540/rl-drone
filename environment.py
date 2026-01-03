@@ -26,7 +26,7 @@ MAX_SPEED = 5.0
 DRAG = 0.97
 THRUST_POWER = 0.2
 ROTATION_SPEED = 0.1
-BULLET_COOLDOWN = 4
+BULLET_COOLDOWN = 20
 
 NUM_RAYS = 32
 RAY_LENGTH = 300
@@ -34,7 +34,7 @@ MAX_STEPS = 1000
 
 # counts (fixed-size arrays for speed)
 N_OBS = 4
-N_EN = 7
+N_EN = 5
 N_FR = 3
 
 # --- COLORS ---
