@@ -93,6 +93,8 @@ class DroneEnv(gym.Env):
         self.last_reward = 0.0
         self.total_score = 0.0
         self.step_count = 0
+        self.position_history = []
+        self.distance_history = []
 
         # Only init pygame if rendering
         self.screen = None
@@ -146,6 +148,8 @@ class DroneEnv(gym.Env):
         self.lidar_rays = []
         self.last_shot = None
         self.last_reward = 0.0
+        self.position_history = []
+        self.distance_history = []
 
         # Spawn obstacles
         existing_centers = []
@@ -419,13 +423,12 @@ class DroneEnv(gym.Env):
 
     def _calculate_reward(self, events, thrust, steer):
         """
-        AGGRESSIVE reward redesign to prevent "spin and wait" strategy.
+        MINIMAL FIX to prevent "circle and wait" strategy.
         
-        Key changes:
-        1. Strong time pressure that scales with distance to enemy
-        2. High penalty for staying far from enemies
-        3. Shooting is expensive unless well-aligned
-        4. Big reward for maintaining "pursuit mode"
+        Changes from original:
+        1. Only reward distance decrease if agent is moving TOWARD enemy
+        2. Track agent's position history to detect camping/circling
+        3. Add small penalty for revisiting same area
         """
         r = 0.0
         
@@ -441,88 +444,157 @@ class DroneEnv(gym.Env):
         
         # ----- SHOOTING OUTCOMES -----
         if events["shot_hit"]:
-            r += 50.0  # BIG reward for kills
+            r += 50.0
         if events["shot_hit_friendly"]:
             r -= 200.0
         if events["shot_missed"]:
-            r -= 1  # Higher miss penalty
+            r -= 1  # REDUCED from 0.5 to encourage shooting while pursuing
         
         # ----- DISTANCE-BASED TIME PRESSURE -----
-        # The farther you are, the more penalty per step
         d = self.enemies_pos - self.drone_pos[None, :]
         dist = np.sqrt((d * d).sum(axis=1) + 1e-8)
         min_dist = float(dist.min())
         
-        # Normalize distance to [0, 1] (0 = touching, 1 = max distance)
         max_possible_dist = np.sqrt(SCREEN_WIDTH**2 + SCREEN_HEIGHT**2)
         norm_dist = min(min_dist / max_possible_dist, 1.0)
         
-        # Quadratic penalty: being 2x farther is 4x worse
         distance_penalty = -0.10 * (norm_dist ** 2)
         r += distance_penalty
         
         # ----- MOVEMENT REQUIREMENT -----
         speed = float(np.linalg.norm(self.drone_vel))
         
-        # Harsh penalty for being stationary
         if speed < 0.5:
-            r -= 0.05 * (1.0 - speed / 0.5)  # up to -0.05 when completely still
+            r -= 0.05 * (1.0 - speed / 0.5)
         
-        # Extra penalty for spinning while slow
         if speed < 0.5:
             r -= 0.02 * abs(steer)
         
-        # ----- CLOSING DISTANCE (MAIN SHAPING) -----
+        # ----- CLOSING DISTANCE (MAIN SHAPING) ----- 
+        # FIX #1: Only reward if agent is actually moving TOWARD enemy
+        # NEW: Scale reward by distance (bigger reward for closing gap from far away)
         if self.prev_enemy_dist is not None:
             delta = self.prev_enemy_dist - min_dist
             
+            # Get direction to nearest enemy
+            idx = int(np.argmin(dist))
+            to_enemy = d[idx] / (dist[idx] + 1e-8)
+            
+            # Check if agent is moving toward enemy
+            is_pursuing = False
+            if speed > 0.1:
+                vel_dir = self.drone_vel / (speed + 1e-8)
+                toward = float(np.dot(vel_dir, to_enemy))
+                is_pursuing = (toward > 0.3)  # At least 30% aligned
+            
             if delta > 0.0:
-                # Reward closing distance (bigger reward when moving fast)
-                speed_factor = min(speed / MAX_SPEED, 1.0)
-                r += 0.30 * delta * (0.5 + 0.5 * speed_factor)
+                # CHANGED: Only reward if agent is actively pursuing
+                if is_pursuing:
+                    speed_factor = min(speed / MAX_SPEED, 1.0)
+                    
+                    # NEW: Distance multiplier - closing gap from far away is MORE valuable
+                    # At 500px: multiplier = 2.5x
+                    # At 300px: multiplier = 1.5x  
+                    # At 150px: multiplier = 1.0x
+                    distance_multiplier = 1.0 + (min_dist / 300.0)
+                    
+                    r += 0.30 * delta * (0.5 + 0.5 * speed_factor) * distance_multiplier
+                else:
+                    # Enemy drifted closer, but we weren't chasing - no reward
+                    pass
             else:
-                # Penalty for letting enemy get farther
-                r += 0.15 * delta  # negative value
+                # Penalty for letting enemy get farther (scales with distance too)
+                distance_factor = 1.0 + (min_dist / 400.0)
+                r += 0.15 * delta * distance_factor
         
         self.prev_enemy_dist = min_dist
         
         # ----- VELOCITY ALIGNMENT (encourage pursuit) -----
+        # NEW: Scale by distance - pursuing far enemies is MORE valuable
         idx = int(np.argmin(dist))
         to_enemy = d[idx] / (dist[idx] + 1e-8)
         
         if speed > 0.1:
             vel_dir = self.drone_vel / (speed + 1e-8)
-            toward = float(np.dot(vel_dir, to_enemy))  # [-1..1]
+            toward = float(np.dot(vel_dir, to_enemy))
             
-            # Strong reward for moving toward enemy
+            # Distance-scaled pursuit bonus
+            # Far enemies (>300px): up to 2x bonus
+            # Close enemies (<150px): 1x bonus
+            pursuit_scale = 1.0 + min(min_dist / 300.0, 1.0)
+            
             if toward > 0:
-                r += 0.15 * toward * (speed / MAX_SPEED)
+                r += 0.15 * toward * (speed / MAX_SPEED) * pursuit_scale
             else:
-                # Penalty for moving away
-                r += 0.05 * toward  # negative
+                r += 0.05 * toward
+        
+        # NEW: "Hunter" bonus - strong reward for full-speed pursuit of distant enemies
+        if min_dist > 250.0 and speed > 3.0:  # Far enemy + moving fast
+            if speed > 0.1:
+                vel_dir = self.drone_vel / (speed + 1e-8)
+                toward = float(np.dot(vel_dir, to_enemy))
+                if toward > 0.7:  # Well-aligned
+                    hunting_bonus = 0.08 * (min_dist / 300.0)  # Scales with distance
+                    r += hunting_bonus
+        
+        # FIX #2: Detect circular motion / camping behavior
+        # Track position history to penalize staying in same area
+        if not hasattr(self, 'position_history'):
+            self.position_history = []
+        
+        self.position_history.append(self.drone_pos.copy())
+        if len(self.position_history) > 50:  # Keep last 50 positions
+            self.position_history.pop(0)
+        
+        # If we have enough history, check if agent is camping
+        if len(self.position_history) >= 30:
+            recent_positions = np.array(self.position_history[-30:])
+            center = recent_positions.mean(axis=0)
+            distances_from_center = np.linalg.norm(recent_positions - center[None, :], axis=1)
+            avg_radius = float(distances_from_center.mean())
+            
+            # If agent has been moving in a small area (radius < 100 pixels)
+            if avg_radius < 100.0:
+                camping_penalty = -0.03 * (1.0 - avg_radius / 100.0)
+                r += camping_penalty
+        
+        # FIX #3: Stronger penalty for maintaining distance instead of closing it
+        # If agent has been at similar distance for a while, penalize
+        if not hasattr(self, 'distance_history'):
+            self.distance_history = []
+        
+        self.distance_history.append(min_dist)
+        if len(self.distance_history) > 30:
+            self.distance_history.pop(0)
+        
+        if len(self.distance_history) >= 20:
+            recent_dists = np.array(self.distance_history[-20:])
+            dist_variance = float(np.var(recent_dists))
+            
+            # INCREASED threshold: If distance staying constant and not close
+            if dist_variance < 900.0 and min_dist > 150.0:  # variance < 30^2 (was 20^2)
+                stagnation_penalty = -0.06  # Increased from -0.04
+                r += stagnation_penalty
         
         # ----- SHOOTING DISCIPLINE -----
         if events.get("shot_fired", False):
             align = float(events.get("shot_alignment", 0.0))
             
-            # High cost for poorly aligned shots
             if align < 0.5:
-                r -= 0.30 * (1.0 - align)  # up to -0.30 for perpendicular shots
+                r -= 0.30 * (1.0 - align)
             
-            # Reward for well-aligned shots
             if align > 0.7:
-                r += 0.50 * (align - 0.7) / 0.3  # up to +0.50 for perfect alignment
+                r += 0.50 * (align - 0.7) / 0.3
         
         # ----- ENGAGEMENT RANGE BONUS -----
-        # Reward for maintaining optimal engagement distance (not too far, not too close)
-        optimal_range = 150.0  # pixels
+        # REDUCED: Don't want agent to be satisfied just maintaining distance
+        optimal_range = 150.0
         range_error = abs(min_dist - optimal_range) / optimal_range
         
-        if min_dist < 300.0:  # only if reasonably close
-            r += 0.02 * (1.0 - min(range_error, 1.0))
+        if min_dist < 250.0:  # Only bonus when reasonably close
+            r += 0.01 * (1.0 - min(range_error, 1.0))  # Halved from 0.02
         
         return float(r)
-
 
     # ---- Vectorized LiDAR ----
     def _ray_wall_dist(self, origin, dirs):
