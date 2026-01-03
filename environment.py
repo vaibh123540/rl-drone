@@ -434,17 +434,17 @@ class DroneEnv(gym.Env):
         
         # ----- TERMINAL PENALTIES -----
         if events["hit_wall"]:
-            r -= 100.0
+            r -= 150.0
         if events["hit_obstacle"]:
-            r -= 100.0
+            r -= 150.0
         if events["hit_enemy"]:
-            r -= 100.0
+            r -= 150.0
         if events["hit_friendly"]:
-            r -= 120.0
+            r -= 150.0
         
         # ----- SHOOTING OUTCOMES -----
         if events["shot_hit"]:
-            r += 50.0
+            r += 75.0
         if events["shot_hit_friendly"]:
             r -= 200.0
         if events["shot_missed"]:
