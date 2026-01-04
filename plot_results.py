@@ -31,7 +31,7 @@ def main():
     sns.lineplot(data=df, x="seen_steps", y="ep_return_ema", linewidth=2.5, color="#4A90E2", label="Average Return")
     sns.lineplot(data=df, x="seen_steps", y="best_eval", linewidth=1.5, color="#E24A4A", linestyle="--", label="Peak Eval Score")
 
-    plt.title("Agent Performance Over Training (1M Steps)", fontsize=16, fontweight='bold', pad=20)
+    plt.title("Agent Performance Over Training (10M Steps)", fontsize=16, fontweight='bold', pad=20)
     plt.xlabel("Total Timesteps", fontsize=12)
     plt.ylabel("Episode Return", fontsize=12)
     plt.legend()
