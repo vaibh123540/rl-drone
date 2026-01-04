@@ -4,6 +4,8 @@ A 2D continuous control environment where an autonomous drone learns to hunt ene
 
 ### Agent Behavior
 
+[![Watch the demo]()](https://github.com/vaibh123540/rl-drone/blob/main/assets/drone-demo.mp4)
+
 ![Agent Demo](https://github.com/vaibh123540/rl-drone/blob/main/assets/drone-demo.mp4)
 
 The trained agent exhibits:
