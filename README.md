@@ -568,16 +568,6 @@ This "turret strategy" achieved small positive rewards (~+20 to +50) by:
 
 5. **Visualization Guides Debugging**: Watching the agent play revealed the turret problem instantly, while metrics alone suggested slow but steady progress.
 
-### Domain Knowledge
-
-1. **Physics-Based RL is Sensitive**: Drag, max speed, and thrust power constants affect learning difficulty. Too much drag makes pursuit impossible; too little makes collision avoidance trivial.
-
-2. **Sensor Design Impacts Learning**: 32 LiDAR rays provided sufficient spatial awareness. Fewer rays (<16) made navigation difficult; more rays (>64) slowed training without clear benefit.
-
-3. **Cooldown Mechanics**: The 5-step shooting cooldown was essential. Without it, agents spam-shot constantly. Too long (>10), and shooting became rare.
-
-4. **Enemy Respawning**: Respawning destroyed enemies maintains task difficulty. Fixed enemies would make the environment progressively easier during an episode.
-
 ---
 
 ## Future Work
@@ -586,41 +576,21 @@ Potential improvements and extensions:
 
 1. **Curriculum Learning**: Start with fewer enemies/obstacles, gradually increase difficulty
 2. **Multi-Agent**: Train multiple drones cooperatively or competitively
-3. **Recurrent Policies**: LSTM/GRU for temporal reasoning (e.g., tracking occluded enemies)
-4. **Transformer Architectures**: Attention mechanisms for multi-entity tracking
-5. **Visual Observations**: Replace LiDAR with pixel-based input (CNN encoder)
-6. **Hierarchical RL**: High-level strategy network + low-level control network
-7. **Model-Based RL**: Learn environment dynamics, plan actions
-8. **Automatic Reward Tuning**: Meta-learn reward coefficients
 
 ---
 
-## Citation
+## References
 
-If you use this codebase in your research, please cite:
+1. **Sutton, R. S., & Barto, A. G.** (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press.  
+   [http://incompleteideas.net/book/the-book-2nd.html](http://incompleteideas.net/book/the-book-2nd.html)
 
-```bibtex
-@misc{drone_combat_rl2026,
-  author = {[Your Name]},
-  title = {Drone Combat: Continuous Control with PPO},
-  year = {2026},
-  publisher = {GitHub},
-  url = {https://github.com/[username]/drone-combat-rl}
-}
-```
+2. **Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.** (2017). Proximal Policy Optimization Algorithms. *arXiv preprint arXiv:1707.06347*.  
+   [https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347)
 
----
+3. **Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P.** (2015). High-Dimensional Continuous Control Using Generalized Advantage Estimation. *arXiv preprint arXiv:1506.02438*.  
+   [https://arxiv.org/abs/1506.02438](https://arxiv.org/abs/1506.02438)
 
-## License
-
-MIT License - See LICENSE file for details
+4. **Kingma, D. P., & Ba, J.** (2014). Adam: A Method for Stochastic Optimization. *arXiv preprint arXiv:1412.6980*.  
+   [https://arxiv.org/abs/1412.6980](https://arxiv.org/abs/1412.6980)
 
 ---
-
-## Acknowledgments
-
-- **Gymnasium**: Environment interface
-- **PyTorch**: Deep learning framework  
-- **Pygame**: Visualization
-- **PPO Paper**: Schulman et al. (2017) - "Proximal Policy Optimization Algorithms"
-- **GAE Paper**: Schulman et al. (2015) - "High-Dimensional Continuous Control Using Generalized Adv
