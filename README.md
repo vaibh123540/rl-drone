@@ -4,7 +4,7 @@ A 2D continuous control environment where an autonomous drone learns to hunt ene
 
 ### Agent Behavior
 
-[![Watch the demo]()](https://github.com/user-attachments/assets/956c262f-066e-4efd-b092-4bff309c19bf)
+https://github.com/user-attachments/assets/956c262f-066e-4efd-b092-4bff309c19bf
 
 The trained agent exhibits:
 - **Active pursuit**: Aggressively chases enemies rather than camping
@@ -153,7 +153,7 @@ The hybrid action space combines continuous control (thrust/steer) with discrete
 
 ### State Space
 
-**State**: $s_t \in \mathbb{R}^{165}$ containing:
+**State**: s<sub>t</sub> ∈ ℝ<sup>165</sup> containing:
 - Drone kinematic state (velocity, heading, cooldown)
 - Relative enemy position
 - LiDAR perception (distance to entities in all directions)
@@ -162,15 +162,17 @@ The hybrid action space combines continuous control (thrust/steer) with discrete
 
 ### Action Space
 
-**Actions**: $a_t = (\text{thrust}, \text{steer}, \text{shoot}) \in [-1,1] \times [-1,1] \times \{0,1\}$
+**Actions**: a<sub>t</sub> = (thrust, steer, shoot) ∈ [-1,1] × [-1,1] × {0,1}
 
-**Policy**: Stochastic, parameterized by neural network $\pi_\theta(a|s)$
+**Policy**: Stochastic, parameterized by neural network π<sub>θ</sub>(a|s)
 
 ### Reward Function
 
 The reward function balances multiple objectives:
 
-$$R(s, a, s') = R_{\text{terminal}} + R_{\text{shooting}} + R_{\text{shaping}}$$
+```
+R(s, a, s') = R_terminal + R_shooting + R_shaping
+```
 
 **Terminal Penalties** (episode-ending events):
 ```
@@ -196,8 +198,10 @@ R_shooting = {
 **Reward Shaping** (continuous, every step):
 
 1. **Distance Penalty** (encourages pursuit):
-   $$R_{\text{distance}} = -0.10 \times (d_{\text{norm}})^2$$
-   where $d_{\text{norm}} = \frac{\text{min\_enemy\_dist}}{\text{max\_possible\_dist}}$
+   ```
+   R_distance = -0.10 × (d_norm)²
+   ```
+   where d<sub>norm</sub> = min_enemy_dist / max_possible_dist
 
 2. **Approach Reward** (reward for closing distance):
    ```
@@ -209,8 +213,10 @@ R_shooting = {
    Only rewards when actively moving toward enemy.
 
 3. **Alignment Bonus** (reward for facing enemy while moving):
-   $$R_{\text{align}} = 0.15 \times (\hat{v} \cdot \hat{e}) \times \frac{v}{v_{\max}} \times \text{pursuit\_scale}$$
-   where $\hat{v}$ is velocity direction, $\hat{e}$ is direction to enemy.
+   ```
+   R_align = 0.15 × (v̂ · ê) × (v/v_max) × pursuit_scale
+   ```
+   where v̂ is velocity direction, ê is direction to enemy.
 
 4. **Anti-Camping Penalties**:
    - **Stationary Penalty**: `-0.05` if speed < 0.5
@@ -227,7 +233,7 @@ R_shooting = {
 
 ### Discount Factor
 
-$\gamma = 0.99$ (favors long-term strategy over immediate rewards)
+γ = 0.99 (favors long-term strategy over immediate rewards)
 
 ### Episode Termination
 
@@ -265,145 +271,79 @@ Input (165D observation)
 The policy outputs parameters for three distributions:
 
 **1. Thrust (Squashed Gaussian)**:
-$$z_{\text{thrust}} \sim \mathcal{N}(\mu_t, \sigma_t^2)$$
-$$\text{thrust} = \sigma(z_{\text{thrust}}) \quad \text{# Sigmoid squashing to [0, 1]}$$
+```
+z_thrust ~ N(μ_t, σ_t²)
+thrust = σ(z_thrust)  # Sigmoid squashing to [0, 1]
+```
 
 Log probability with Jacobian correction:
-$$\log \pi(\text{thrust}|s) = \log \mathcal{N}(z; \mu_t, \sigma_t^2) - \log\left|\frac{d\sigma}{dz}\right|$$
-$$= -\frac{1}{2}\left[\frac{z-\mu_t}{\sigma_t}\right]^2 - \log(\sigma_t) - \frac{1}{2}\log(2\pi) - \log[\text{thrust}(1-\text{thrust})]$$
+```
+log π(thrust|s) = log N(z; μ_t, σ_t²) - log|dσ/dz|
+                = -½[(z-μ_t)/σ_t]² - log(σ_t) - ½log(2π) - log[thrust(1-thrust)]
+```
 
 **2. Steer (Squashed Gaussian)**:
-$$z_{\text{steer}} \sim \mathcal{N}(\mu_s, \sigma_s^2)$$
-$$\text{steer} = \tanh(z_{\text{steer}}) \quad \text{# Tanh squashing to [-1, 1]}$$
+```
+z_steer ~ N(μ_s, σ_s²)  
+steer = tanh(z_steer)  # Tanh squashing to [-1, 1]
+```
 
 Log probability:
-$$\log \pi(\text{steer}|s) = \log \mathcal{N}(z; \mu_s, \sigma_s^2) - \log\left|\frac{d\tanh}{dz}\right|$$
-$$= -\frac{1}{2}\left[\frac{z-\mu_s}{\sigma_s}\right]^2 - \log(\sigma_s) - \frac{1}{2}\log(2\pi) - \log(1 - \text{steer}^2)$$
+```
+log π(steer|s) = log N(z; μ_s, σ_s²) - log|d tanh/dz|
+               = -½[(z-μ_s)/σ_s]² - log(σ_s) - ½log(2π) - log(1 - steer²)
+```
 
 **3. Shoot (Bernoulli)**:
-$$p = \sigma(\text{shoot\_logit})$$
-$$\text{shoot} \sim \text{Bernoulli}(p)$$
+```
+p = σ(shoot_logit)
+shoot ~ Bernoulli(p)
+```
 
 Log probability:
-$$\log \pi(\text{shoot}|s) = \text{shoot} \cdot \log(p) + (1-\text{shoot}) \cdot \log(1-p)$$
+```
+log π(shoot|s) = shoot·log(p) + (1-shoot)·log(1-p)
+```
 
 Joint policy:
-$$\log \pi(a|s) = \log \pi(\text{thrust}|s) + \log \pi(\text{steer}|s) + \log \pi(\text{shoot}|s)$$
-
-### PPO Clipped Objective
-
-Standard policy gradient suffers from high variance and requires tiny learning rates. PPO addresses this with a clipped surrogate objective:
-
-$$\mathcal{L}^{\text{CLIP}}(\theta) = \mathbb{E}_t \left[\min\left(r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t\right)\right]$$
-
-where:
-- $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}$ is the probability ratio
-- $\hat{A}_t$ is the advantage estimate (GAE)
-- $\epsilon = 0.2$ is the clipping parameter
-
-**Intuition**: The `clip` operation prevents the policy from changing too drastically in a single update:
-- If advantage is positive (good action), allow increase up to $1+\epsilon$
-- If advantage is negative (bad action), allow decrease down to $1-\epsilon$
-- Take the minimum to be conservative
-
-### Value Function Loss
-
-Clipped value loss to prevent large value function updates:
-
-$$\mathcal{L}^{\text{VF}}(\theta) = \mathbb{E}_t \left[\max\left((V_\theta(s_t) - V^{\text{target}})^2, (V_{\text{clip}} - V^{\text{target}})^2\right)\right]$$
-
-where:
-$$V_{\text{clip}} = V_{\text{old}}(s_t) + \text{clip}(V_\theta(s_t) - V_{\text{old}}(s_t), -\epsilon, +\epsilon)$$
-$$V^{\text{target}} = \hat{A}_t + V_\theta(s_t) \quad \text{(TD target)}$$
-
-### Entropy Regularization
-
-To encourage exploration, we add an entropy bonus:
-
-$$H[\pi_\theta] = \mathbb{E}_s \left[\mathbb{E}_{a \sim \pi_\theta}(-\log \pi_\theta(a|s))\right]$$
-
-For our distributions:
-- Gaussian: $H = \frac{1}{2}\log(2\pi e \sigma^2)$
-- Bernoulli: $H = -p \log(p) - (1-p)\log(1-p)$
-
-### Complete Loss Function
-
-$$\mathcal{L}(\theta) = -\mathcal{L}^{\text{CLIP}}(\theta) + c_v \cdot \mathcal{L}^{\text{VF}}(\theta) - c_e \cdot H[\pi_\theta]$$
+```
+log π(a|s) = log π(thrust|s) + log π(steer|s) + log π(shoot|s)
+```
 
 Hyperparameters:
-- $c_v = 0.5$ (value function coefficient)
-- $c_e = 0.01$ (entropy coefficient)
-
-### Generalized Advantage Estimation (GAE)
-
-GAE balances bias-variance tradeoff in advantage estimation:
-
-$$\hat{A}_t = \sum_{l=0}^{\infty} (\gamma\lambda)^l \delta_{t+l}$$
-
-where $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ is the TD error.
+- c<sub>v</sub> = 0.5 (value function coefficient)
+- c<sub>e</sub> = 0.01 (entropy coefficient)
 
 **Parameters**:
-- $\gamma = 0.99$ (discount factor)
-- $\lambda = 0.95$ (GAE parameter, higher = less bias, more variance)
-
-**Implementation** (backward recursion):
-```python
-A_t = δ_t + (γλ)(1 - done_t)·A_{t+1}
-```
+- γ = 0.99 (discount factor)
+- λ = 0.95 (GAE parameter, higher = less bias, more variance)
+  
 
 ### Optimization: Adam
 
 **Adam** (Adaptive Moment Estimation) combines the benefits of AdaGrad and RMSProp:
 
-$$m_t = \beta_1 \cdot m_{t-1} + (1-\beta_1) \cdot \nabla \mathcal{L}_t \quad \text{# First moment (momentum)}$$
-$$v_t = \beta_2 \cdot v_{t-1} + (1-\beta_2) \cdot (\nabla \mathcal{L}_t)^2 \quad \text{# Second moment (adaptive lr)}$$
+```
+m_t = β₁·m_{t-1} + (1-β₁)·∇L_t        # First moment (momentum)
+v_t = β₂·v_{t-1} + (1-β₂)·(∇L_t)²    # Second moment (adaptive lr)
 
-$$\hat{m}_t = \frac{m_t}{1 - \beta_1^t} \quad \text{# Bias correction}$$
-$$\hat{v}_t = \frac{v_t}{1 - \beta_2^t}$$
+m̂_t = m_t / (1 - β₁^t)                # Bias correction
+v̂_t = v_t / (1 - β₂^t)
 
-$$\theta_t = \theta_{t-1} - \alpha \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}$$
+θ_t = θ_{t-1} - α · m̂_t / (√v̂_t + ε)
+```
 
 **Why Adam?**
 1. **Per-parameter learning rates**: Different parameters update at different speeds based on gradient history
 2. **Momentum**: Accelerates learning in consistent directions
-3. **Stability**: $\sqrt{\hat{v}_t}$ prevents exploding gradients
+3. **Stability**: √v̂<sub>t</sub> prevents exploding gradients
 4. **Bias correction**: Accounts for initial zero moments
 
 **Hyperparameters**:
-- $\alpha = 3 \times 10^{-4}$ (learning rate)
-- $\beta_1 = 0.9$ (momentum decay)
-- $\beta_2 = 0.999$ (variance decay)  
-- $\epsilon = 10^{-5}$ (numerical stability)
-
-### Training Procedure
-
-1. **Collect Rollouts** (128 steps × 32 envs = 4096 transitions)
-   ```python
-   for step in range(128):
-       action, logprob, value = policy.act(obs)
-       next_obs, reward, done = env.step(action)
-       buffer.add(obs, action, logprob, reward, done, value)
-   ```
-
-2. **Compute Returns & Advantages** using GAE
-
-3. **Update Policy** (8 epochs × multiple minibatches)
-   ```python
-   for epoch in range(8):
-       for minibatch in buffer.minibatches(512):
-           new_logprob, entropy, new_value = policy.evaluate(minibatch)
-           ratio = exp(new_logprob - old_logprob)
-           
-           # PPO loss
-           loss = -min(ratio * adv, clip(ratio) * adv).mean()
-           loss += 0.5 * value_loss - 0.01 * entropy.mean()
-           
-           loss.backward()
-           clip_grad_norm(policy.parameters(), 0.5)
-           optimizer.step()
-   ```
-
-4. **Repeat** until convergence
+- α = 3×10<sup>-4</sup> (learning rate)
+- β₁ = 0.9 (momentum decay)
+- β₂ = 0.999 (variance decay)  
+- ε = 10<sup>-5</sup> (numerical stability)
 
 ---
 
@@ -534,7 +474,7 @@ This "turret strategy" achieved small positive rewards (~+20 to +50) by:
    ```python
    log π = ... - log[thrust(1-thrust)]
    ```
-   becomes $-\infty$ when $\text{thrust} \in \{0, 1\}$.
+   becomes -∞ when thrust ∈ {0, 1}.
 
 3. **Advantage Outliers**: Rare high-reward episodes created huge advantages after normalization.
 
@@ -557,7 +497,7 @@ This "turret strategy" achieved small positive rewards (~+20 to +50) by:
    ```python
    logstd = torch.clamp(self.logstd, -5.0, 2.0)
    ```
-   Limits standard deviation to $[0.0067, 7.39]$, preventing both over-confidence and extreme exploration.
+   Limits standard deviation to [0.0067, 7.39], preventing both over-confidence and extreme exploration.
 
 3. **Gradient Clipping**:
    ```python
@@ -579,16 +519,16 @@ This "turret strategy" achieved small positive rewards (~+20 to +50) by:
 ### 3. Hyperparameter Sensitivity
 
 **Challenge**: Small changes in hyperparameters had large impacts on convergence:
-- Learning rate too high ($5 \times 10^{-4}$) → policy collapse
+- Learning rate too high (5×10<sup>-4</sup>) → policy collapse
 - Entropy coefficient too low (0.001) → premature convergence to turret
 - Clipping too tight (0.1) → slow learning
-- GAE $\lambda$ too low (0.8) → high variance, instability
+- GAE λ too low (0.8) → high variance, instability
 
 **Solution**: Extensive grid search and adaptive tuning:
 - Started with conservative values
 - Increased entropy coefficient (0.01) to encourage exploration
 - Used moderate clipping (0.2) for stable updates
-- High GAE $\lambda$ (0.95) for lower variance
+- High GAE λ (0.95) for lower variance
 
 ---
 
@@ -608,7 +548,7 @@ This "turret strategy" achieved small positive rewards (~+20 to +50) by:
 
 ### Algorithmic Understanding
 
-1. **GAE Reduces Variance**: Without GAE ($\lambda=0$, pure TD), training was extremely noisy. GAE ($\lambda=0.95$) smoothed learning significantly.
+1. **GAE Reduces Variance**: Without GAE (λ=0, pure TD), training was extremely noisy. GAE (λ=0.95) smoothed learning significantly.
 
 2. **Value Function Quality Matters**: A well-trained critic reduces policy gradient variance. Value loss clipping prevents value function overfitting.
 
@@ -683,4 +623,4 @@ MIT License - See LICENSE file for details
 - **PyTorch**: Deep learning framework  
 - **Pygame**: Visualization
 - **PPO Paper**: Schulman et al. (2017) - "Proximal Policy Optimization Algorithms"
-- **GAE Paper**: Schulman et al. (2015) - "High-Dimensional Continuous Control Using Generalized Advantage Estimation"
+- **GAE Paper**: Schulman et al. (2015) - "High-Dimensional Continuous Control Using Generalized Adv
