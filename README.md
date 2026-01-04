@@ -4,7 +4,7 @@ A 2D continuous control environment where an autonomous drone learns to hunt ene
 
 ### Agent Behavior
 
-[![Watch the demo](https://upload.wikimedia.org/wikipedia/commons/1/1b/Reinforcement_learning_diagram.svg)](https://raw.githubusercontent.com/vaibh123540/rl-drone/blob/main/assets/drone-demo.mp4)
+[![Watch the demo](https://upload.wikimedia.org/wikipedia/commons/1/1b/Reinforcement_learning_diagram.svg)](https://github.com/user-attachments/assets/68ea8327-d431-46b1-a037-09ed17aa373b)
 
 The trained agent exhibits:
 - **Active pursuit**: Aggressively chases enemies rather than camping
