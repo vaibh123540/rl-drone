@@ -1,8 +1,6 @@
-# environment.py  (UPDATED: reward shaping to stop spin-farming + encourage movement/kills)
 import math
 import numpy as np
 
-# Optional pygame (only used if render_mode="human")
 try:
     import pygame
 except ImportError:
@@ -26,7 +24,7 @@ MAX_SPEED = 5.0
 DRAG = 0.97
 THRUST_POWER = 0.2
 ROTATION_SPEED = 0.1
-BULLET_COOLDOWN = 20
+BULLET_COOLDOWN = 5
 
 NUM_RAYS = 32
 RAY_LENGTH = 300
@@ -49,45 +47,38 @@ YELLOW = (255, 255, 0)
 
 class DroneEnv(gym.Env):
     """
-    Fast RL-friendly env:
-    - No pygame init unless render_mode="human"
-    - Vectorized LiDAR
-    - Fixed-size arrays for entities
-
-    Reward (UPDATED):
-    - No "alive bonus" (prevents reward farming by doing nothing)
-    - Step cost (time pressure)
-    - Big terminal penalties for crashes / friendly hits
-    - Main positive reward for enemy hits
-    - Miss penalty is small (doesn't make agent afraid to shoot early)
-    - Shaping is based on PROGRESS (distance decreasing) + movement toward enemy
-    - Tiny steering penalty only when basically stationary (kills spin-in-place exploits)
-    - Optional small bonus for shooting when aligned (only paid when a shot actually fires)
+    Gymnasium environment for a 2D drone combat simulation.
+    Features vectorized LiDAR sensing and continuous control.
     """
     metadata = {"render_modes": ["human", None], "render_fps": FPS}
 
     def __init__(self, render_mode=None, seed=None):
+        """
+        Initialize the environment.
+
+        Args:
+            render_mode (str | None): "human" for pygame rendering or None.
+            seed (int | None): Seed for the random number generator.
+        """
         super().__init__()
         self.render_mode = render_mode
-
         self.rng = np.random.default_rng(seed)
 
-        # Precompute ray offsets (relative to drone heading)
         self.ray_offsets = np.linspace(0.0, 2.0 * np.pi, NUM_RAYS, endpoint=False).astype(np.float32)
 
-        # Action space: [thrust(-1..1), steer(-1..1), shoot(0..1)]
+        # Action: [thrust(-1..1), steer(-1..1), shoot(0..1)]
         self.action_space = spaces.Box(
             low=np.array([-1.0, -1.0, 0.0], dtype=np.float32),
             high=np.array([1.0,  1.0, 1.0], dtype=np.float32),
             dtype=np.float32
         )
 
-        obs_dim = 5 + 2 + 4 * NUM_RAYS  # base(5) + rel_enemy(2) + lidar(4*NUM_RAYS)
+        obs_dim = 5 + 2 + 4 * NUM_RAYS
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
 
-        # Debug/render helpers
+        # State tracking
         self.lidar_rays = []
         self.last_shot = None
         self.last_reward = 0.0
@@ -96,7 +87,6 @@ class DroneEnv(gym.Env):
         self.position_history = []
         self.distance_history = []
 
-        # Only init pygame if rendering
         self.screen = None
         self.clock = None
         self.font = None
@@ -108,13 +98,13 @@ class DroneEnv(gym.Env):
             self.clock = pygame.time.Clock()
             self.font = pygame.font.SysFont("Arial", 18)
 
-        # State placeholders
+        # Physics state
         self.drone_pos = np.zeros(2, dtype=np.float32)
         self.drone_vel = np.zeros(2, dtype=np.float32)
         self.drone_angle = 0.0
         self.cooldown = 0
 
-        # Entities as arrays
+        # Entity arrays
         self.obstacles_pos = np.zeros((N_OBS, 2), dtype=np.float32)
         self.obstacles_r   = np.zeros((N_OBS,), dtype=np.float32)
 
@@ -126,14 +116,26 @@ class DroneEnv(gym.Env):
         self.friends_vel = np.zeros((N_FR, 2), dtype=np.float32)
         self.friends_r   = np.full((N_FR,), FRIENDLY_RADIUS, dtype=np.float32)
 
-        # Reward shaping memory
         self.prev_enemy_dist = None
 
     def close(self):
+        """
+        Clean up resources (pygame window).
+        """
         if self.render_mode == "human" and pygame is not None:
             pygame.quit()
 
     def reset(self, seed=None, options=None):
+        """
+        Reset the environment to initial state.
+
+        Args:
+            seed (int | None): Seed for RNG.
+            options (dict | None): Additional reset options.
+
+        Returns:
+            tuple[np.ndarray, dict]: Initial observation and info dictionary.
+        """
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -151,7 +153,6 @@ class DroneEnv(gym.Env):
         self.position_history = []
         self.distance_history = []
 
-        # Spawn obstacles
         existing_centers = []
         existing_radii = []
         for i in range(N_OBS):
@@ -166,7 +167,6 @@ class DroneEnv(gym.Env):
             existing_centers.append(pos)
             existing_radii.append(r)
 
-        # Spawn enemies (avoid obstacles)
         for i in range(N_EN):
             pos, _ = self._get_random_pos(
                 min_dist=150,
@@ -177,7 +177,6 @@ class DroneEnv(gym.Env):
             self.enemies_pos[i] = pos
             self.enemies_vel[i] = self.rng.normal(0, 0.5, size=2).astype(np.float32)
 
-        # Spawn friendlies (avoid obstacles + enemies)
         all_centers = np.concatenate([self.obstacles_pos, self.enemies_pos], axis=0)
         all_radii = np.concatenate([self.obstacles_r, self.enemies_r], axis=0)
         for i in range(N_FR):
@@ -190,7 +189,6 @@ class DroneEnv(gym.Env):
             self.friends_pos[i] = pos
             self.friends_vel[i] = self.rng.normal(0, 0.3, size=2).astype(np.float32)
 
-        # init reward shaping memory
         d = self.enemies_pos - self.drone_pos[None, :]
         dist = np.sqrt((d * d).sum(axis=1) + 1e-8)
         self.prev_enemy_dist = float(dist.min())
@@ -198,6 +196,18 @@ class DroneEnv(gym.Env):
         return self._get_observation(), {}
 
     def _get_random_pos(self, min_dist, radius_range, existing_centers, existing_radii):
+        """
+        Generate a valid random position avoiding collisions.
+
+        Args:
+            min_dist (float): Minimum distance from the drone.
+            radius_range (tuple[float, float]): Min and max radius for the entity.
+            existing_centers (list[np.ndarray]): Positions of existing entities.
+            existing_radii (list[float]): Radii of existing entities.
+
+        Returns:
+            tuple[np.ndarray, float]: Position vector and radius.
+        """
         for _ in range(200):
             if radius_range[0] == radius_range[1]:
                 r = float(radius_range[0])
@@ -208,11 +218,9 @@ class DroneEnv(gym.Env):
             y = float(self.rng.integers(int(r), int(SCREEN_HEIGHT - r)))
             pos = np.array([x, y], dtype=np.float32)
 
-            # 1) not too close to drone
             if np.linalg.norm(pos - self.drone_pos) < min_dist:
                 continue
 
-            # 2) no overlap with existing circles
             valid = True
             for c, cr in zip(existing_centers, existing_radii):
                 if np.linalg.norm(pos - c) < (r + float(cr) + 10.0):
@@ -222,15 +230,22 @@ class DroneEnv(gym.Env):
             if valid:
                 return pos, r
 
-        # fallback
         return np.array([50.0, 50.0], dtype=np.float32), float(radius_range[0])
 
     def step(self, action):
+        """
+        Execute one environment step.
+
+        Args:
+            action (np.ndarray): [thrust, steer, shoot].
+
+        Returns:
+            tuple[np.ndarray, float, bool, bool, dict]: Obs, reward, terminated, truncated, info.
+        """
         thrust = float(np.clip(action[0], -1.0, 1.0))
         steer  = float(np.clip(action[1], -1.0, 1.0))
         shoot  = bool(action[2] > 0.5)
 
-        # --- PHYSICS ---
         self.drone_angle = (self.drone_angle + steer * ROTATION_SPEED) % (2.0 * np.pi)
 
         if thrust > 0.0:
@@ -245,11 +260,8 @@ class DroneEnv(gym.Env):
             self.drone_vel[:] = (self.drone_vel / speed) * MAX_SPEED
 
         self.drone_pos += self.drone_vel
-
-        # update enemies/friends motion
         self._update_entities()
 
-        # --- EVENTS ---
         events = {
             "hit_wall": False, "hit_obstacle": False, "hit_friendly": False, "hit_enemy": False,
             "shot_hit": False, "shot_missed": False, "shot_hit_friendly": False,
@@ -258,13 +270,11 @@ class DroneEnv(gym.Env):
         terminated = False
         truncated = False
 
-        # --- COLLISIONS WITH WALL ---
         if (self.drone_pos[0] < 0 or self.drone_pos[0] > SCREEN_WIDTH or
             self.drone_pos[1] < 0 or self.drone_pos[1] > SCREEN_HEIGHT):
             events["hit_wall"] = True
             terminated = True
 
-        # --- COLLISIONS WITH CIRCLES (vectorized) ---
         if not terminated:
             if self._collides_any(self.obstacles_pos, self.obstacles_r):
                 events["hit_obstacle"] = True
@@ -276,19 +286,17 @@ class DroneEnv(gym.Env):
                 events["hit_enemy"] = True
                 terminated = True
 
-        # --- SHOOTING ---
         can_shoot = (self.cooldown <= 0)
         if self.cooldown > 0:
             self.cooldown -= 1
 
         if shoot and can_shoot and not terminated:
-            # alignment to closest enemy at the moment we shoot
             d = self.enemies_pos - self.drone_pos[None, :]
             dist = np.sqrt((d * d).sum(axis=1) + 1e-8)
             idx = int(np.argmin(dist))
             to_enemy = d[idx] / (dist[idx] + 1e-8)
             heading = np.array([math.cos(self.drone_angle), math.sin(self.drone_angle)], dtype=np.float32)
-            events["shot_alignment"] = float(np.dot(heading, to_enemy))  # [-1..1]
+            events["shot_alignment"] = float(np.dot(heading, to_enemy))
 
             self.cooldown = BULLET_COOLDOWN
             shot_result, impact_point = self._process_shot()
@@ -306,10 +314,8 @@ class DroneEnv(gym.Env):
             else:
                 events["shot_missed"] = True
 
-        # --- REWARD ---
         reward = self._calculate_reward(events, thrust, steer)
 
-        # --- STEP COUNT / TRUNCATION ---
         self.step_count += 1
         if self.step_count >= MAX_STEPS:
             truncated = True
@@ -317,9 +323,6 @@ class DroneEnv(gym.Env):
         self.last_reward = reward
         self.total_score += reward
 
-        # --- INFO FOR LOGGING/DEBUGGING (NEW) ---
-        # term_code:
-        # 0 = none, 1 = wall, 2 = obstacle, 3 = friendly collision, 4 = enemy collision, 5 = timeout(trunc)
         term_code = 0
         if events["hit_wall"]:
             term_code = 1
@@ -330,7 +333,7 @@ class DroneEnv(gym.Env):
         elif events["hit_enemy"]:
             term_code = 4
         if truncated:
-            term_code = 5  # override
+            term_code = 5
 
         info = {
             "term_code": int(term_code),
@@ -345,35 +348,48 @@ class DroneEnv(gym.Env):
 
 
     def _collides_any(self, centers, radii):
+        """
+        Check collision between drone and any of the circular entities.
+
+        Args:
+            centers (np.ndarray): Array of center positions (N, 2).
+            radii (np.ndarray): Array of radii (N,).
+
+        Returns:
+            bool: True if collision detected.
+        """
         d = centers - self.drone_pos[None, :]
         dist2 = (d * d).sum(axis=1)
         rr = (DRONE_RADIUS + radii) ** 2
         return bool(np.any(dist2 < rr))
 
     def _update_entities(self):
-        # enemies
+        """
+        Update positions and velocities of enemies and friends, handling wall bounces.
+        """
         self.enemies_pos += self.enemies_vel
-
         mask = (self.enemies_pos[:, 0] < 0) | (self.enemies_pos[:, 0] > SCREEN_WIDTH)
         self.enemies_vel[mask, 0] *= -1
         mask = (self.enemies_pos[:, 1] < 0) | (self.enemies_pos[:, 1] > SCREEN_HEIGHT)
         self.enemies_vel[mask, 1] *= -1
-
         self.enemies_pos[:, 0] = np.clip(self.enemies_pos[:, 0], 0, SCREEN_WIDTH)
         self.enemies_pos[:, 1] = np.clip(self.enemies_pos[:, 1], 0, SCREEN_HEIGHT)
 
-        # friends
         self.friends_pos += self.friends_vel
-
         mask = (self.friends_pos[:, 0] < 0) | (self.friends_pos[:, 0] > SCREEN_WIDTH)
         self.friends_vel[mask, 0] *= -1
         mask = (self.friends_pos[:, 1] < 0) | (self.friends_pos[:, 1] > SCREEN_HEIGHT)
         self.friends_vel[mask, 1] *= -1
-
         self.friends_pos[:, 0] = np.clip(self.friends_pos[:, 0], 0, SCREEN_WIDTH)
         self.friends_pos[:, 1] = np.clip(self.friends_pos[:, 1], 0, SCREEN_HEIGHT)
 
     def _process_shot(self):
+        """
+        Raycast a shot and determine what was hit. Respawns enemy on hit.
+
+        Returns:
+            tuple[str, np.ndarray]: Result ("MISS", "OBSTACLE", "FRIEND", "ENEMY") and impact point.
+        """
         start = self.drone_pos
         direction = np.array([math.cos(self.drone_angle), math.sin(self.drone_angle)], dtype=np.float32)
 
@@ -423,16 +439,20 @@ class DroneEnv(gym.Env):
 
     def _calculate_reward(self, events, thrust, steer):
         """
-        MINIMAL FIX to prevent "circle and wait" strategy.
-        
-        Changes from original:
-        1. Only reward distance decrease if agent is moving TOWARD enemy
-        2. Track agent's position history to detect camping/circling
-        3. Add small penalty for revisiting same area
+        Calculate reward based on agent progress, alignment, and collisions.
+        Includes shaping to encourage pursuit and discourage camping.
+
+        Args:
+            events (dict): Dictionary of frame events.
+            thrust (float): Thrust action value.
+            steer (float): Steer action value.
+
+        Returns:
+            float: Calculated reward.
         """
         r = 0.0
         
-        # ----- TERMINAL PENALTIES -----
+        # Terminal penalties
         if events["hit_wall"]:
             r -= 150.0
         if events["hit_obstacle"]:
@@ -442,15 +462,15 @@ class DroneEnv(gym.Env):
         if events["hit_friendly"]:
             r -= 150.0
         
-        # ----- SHOOTING OUTCOMES -----
+        # Shooting outcomes
         if events["shot_hit"]:
             r += 75.0
         if events["shot_hit_friendly"]:
             r -= 200.0
         if events["shot_missed"]:
-            r -= 1  # REDUCED from 0.5 to encourage shooting while pursuing
+            r -= 1
         
-        # ----- DISTANCE-BASED TIME PRESSURE -----
+        # Distance calculation
         d = self.enemies_pos - self.drone_pos[None, :]
         dist = np.sqrt((d * d).sum(axis=1) + 1e-8)
         min_dist = float(dist.min())
@@ -458,59 +478,41 @@ class DroneEnv(gym.Env):
         max_possible_dist = np.sqrt(SCREEN_WIDTH**2 + SCREEN_HEIGHT**2)
         norm_dist = min(min_dist / max_possible_dist, 1.0)
         
+        # Time pressure based on distance
         distance_penalty = -0.10 * (norm_dist ** 2)
         r += distance_penalty
         
-        # ----- MOVEMENT REQUIREMENT -----
+        # Idle/stationary penalty
         speed = float(np.linalg.norm(self.drone_vel))
-        
         if speed < 0.5:
             r -= 0.05 * (1.0 - speed / 0.5)
-        
-        if speed < 0.5:
             r -= 0.02 * abs(steer)
         
-        # ----- CLOSING DISTANCE (MAIN SHAPING) ----- 
-        # FIX #1: Only reward if agent is actually moving TOWARD enemy
-        # NEW: Scale reward by distance (bigger reward for closing gap from far away)
+        # Reward for closing distance (only if actively pursuing)
         if self.prev_enemy_dist is not None:
             delta = self.prev_enemy_dist - min_dist
             
-            # Get direction to nearest enemy
             idx = int(np.argmin(dist))
             to_enemy = d[idx] / (dist[idx] + 1e-8)
             
-            # Check if agent is moving toward enemy
             is_pursuing = False
             if speed > 0.1:
                 vel_dir = self.drone_vel / (speed + 1e-8)
                 toward = float(np.dot(vel_dir, to_enemy))
-                is_pursuing = (toward > 0.3)  # At least 30% aligned
+                is_pursuing = (toward > 0.3)
             
             if delta > 0.0:
-                # CHANGED: Only reward if agent is actively pursuing
                 if is_pursuing:
                     speed_factor = min(speed / MAX_SPEED, 1.0)
-                    
-                    # NEW: Distance multiplier - closing gap from far away is MORE valuable
-                    # At 500px: multiplier = 2.5x
-                    # At 300px: multiplier = 1.5x  
-                    # At 150px: multiplier = 1.0x
                     distance_multiplier = 1.0 + (min_dist / 300.0)
-                    
                     r += 0.30 * delta * (0.5 + 0.5 * speed_factor) * distance_multiplier
-                else:
-                    # Enemy drifted closer, but we weren't chasing - no reward
-                    pass
             else:
-                # Penalty for letting enemy get farther (scales with distance too)
                 distance_factor = 1.0 + (min_dist / 400.0)
                 r += 0.15 * delta * distance_factor
         
         self.prev_enemy_dist = min_dist
         
-        # ----- VELOCITY ALIGNMENT (encourage pursuit) -----
-        # NEW: Scale by distance - pursuing far enemies is MORE valuable
+        # Velocity alignment bonus (scaled by distance)
         idx = int(np.argmin(dist))
         to_enemy = d[idx] / (dist[idx] + 1e-8)
         
@@ -518,9 +520,6 @@ class DroneEnv(gym.Env):
             vel_dir = self.drone_vel / (speed + 1e-8)
             toward = float(np.dot(vel_dir, to_enemy))
             
-            # Distance-scaled pursuit bonus
-            # Far enemies (>300px): up to 2x bonus
-            # Close enemies (<150px): 1x bonus
             pursuit_scale = 1.0 + min(min_dist / 300.0, 1.0)
             
             if toward > 0:
@@ -528,38 +527,34 @@ class DroneEnv(gym.Env):
             else:
                 r += 0.05 * toward
         
-        # NEW: "Hunter" bonus - strong reward for full-speed pursuit of distant enemies
-        if min_dist > 250.0 and speed > 3.0:  # Far enemy + moving fast
+        # Bonus for high-speed pursuit at range
+        if min_dist > 250.0 and speed > 3.0:
             if speed > 0.1:
                 vel_dir = self.drone_vel / (speed + 1e-8)
                 toward = float(np.dot(vel_dir, to_enemy))
-                if toward > 0.7:  # Well-aligned
-                    hunting_bonus = 0.08 * (min_dist / 300.0)  # Scales with distance
+                if toward > 0.7:
+                    hunting_bonus = 0.08 * (min_dist / 300.0)
                     r += hunting_bonus
         
-        # FIX #2: Detect circular motion / camping behavior
-        # Track position history to penalize staying in same area
+        # Anti-camping logic: check position history
         if not hasattr(self, 'position_history'):
             self.position_history = []
         
         self.position_history.append(self.drone_pos.copy())
-        if len(self.position_history) > 50:  # Keep last 50 positions
+        if len(self.position_history) > 50:
             self.position_history.pop(0)
         
-        # If we have enough history, check if agent is camping
         if len(self.position_history) >= 30:
             recent_positions = np.array(self.position_history[-30:])
             center = recent_positions.mean(axis=0)
             distances_from_center = np.linalg.norm(recent_positions - center[None, :], axis=1)
             avg_radius = float(distances_from_center.mean())
             
-            # If agent has been moving in a small area (radius < 100 pixels)
             if avg_radius < 100.0:
                 camping_penalty = -0.03 * (1.0 - avg_radius / 100.0)
                 r += camping_penalty
         
-        # FIX #3: Stronger penalty for maintaining distance instead of closing it
-        # If agent has been at similar distance for a while, penalize
+        # Anti-stagnation logic: check distance history
         if not hasattr(self, 'distance_history'):
             self.distance_history = []
         
@@ -571,36 +566,37 @@ class DroneEnv(gym.Env):
             recent_dists = np.array(self.distance_history[-20:])
             dist_variance = float(np.var(recent_dists))
             
-            # INCREASED threshold: If distance staying constant and not close
-            if dist_variance < 900.0 and min_dist > 150.0:  # variance < 30^2 (was 20^2)
-                stagnation_penalty = -0.06  # Increased from -0.04
+            if dist_variance < 900.0 and min_dist > 150.0:
+                stagnation_penalty = -0.06
                 r += stagnation_penalty
         
-        # ----- SHOOTING DISCIPLINE -----
+        # Shooting discipline bonus/penalty
         if events.get("shot_fired", False):
             align = float(events.get("shot_alignment", 0.0))
-            
             if align < 0.5:
                 r -= 0.30 * (1.0 - align)
-            
             if align > 0.7:
                 r += 0.50 * (align - 0.7) / 0.3
         
-        # ----- ENGAGEMENT RANGE BONUS -----
-        # REDUCED: Don't want agent to be satisfied just maintaining distance
+        # Engagement range bonus
         optimal_range = 150.0
         range_error = abs(min_dist - optimal_range) / optimal_range
         
-        if min_dist < 250.0:  # Only bonus when reasonably close
-            r += 0.01 * (1.0 - min(range_error, 1.0))  # Halved from 0.02
+        if min_dist < 250.0:
+            r += 0.01 * (1.0 - min(range_error, 1.0))
         
         return float(r)
 
-    # ---- Vectorized LiDAR ----
     def _ray_wall_dist(self, origin, dirs):
         """
-        FIXED: avoids np.where-evaluates-both-branches divide-by-zero.
-        Uses masked division + hard sanitization, so render never sees NaN/Inf.
+        Calculate distance from origin to walls along direction vectors.
+
+        Args:
+            origin (np.ndarray): Start point (2,).
+            dirs (np.ndarray): Direction vectors (N, 2).
+
+        Returns:
+            np.ndarray: Normalized distances (0.0 to 1.0).
         """
         x0, y0 = float(origin[0]), float(origin[1])
         dx = dirs[:, 0].astype(np.float32)
@@ -630,14 +626,26 @@ class DroneEnv(gym.Env):
         return out
 
     def _ray_circle_min_dist(self, origin, dirs, centers, radii):
+        """
+        Calculate minimum distance to circles along direction vectors.
+
+        Args:
+            origin (np.ndarray): Start point (2,).
+            dirs (np.ndarray): Direction vectors (R, 2).
+            centers (np.ndarray): Circle centers (N, 2).
+            radii (np.ndarray): Circle radii (N,).
+
+        Returns:
+            np.ndarray: Normalized distances (0.0 to 1.0).
+        """
         if centers is None or len(centers) == 0:
             return np.ones((NUM_RAYS,), dtype=np.float32)
 
-        f = centers - origin[None, :]               # (N,2)
-        proj = f @ dirs.T                           # (N,R)
-        f_norm_sq = (f * f).sum(axis=1)             # (N,)
-        dist_sq = f_norm_sq[:, None] - proj * proj  # (N,R)
-        r2 = (radii * radii)[:, None]               # (N,1)
+        f = centers - origin[None, :]
+        proj = f @ dirs.T
+        f_norm_sq = (f * f).sum(axis=1)
+        dist_sq = f_norm_sq[:, None] - proj * proj
+        r2 = (radii * radii)[:, None]
 
         valid = (proj > 0.0) & (dist_sq < r2)
         offset = np.sqrt(np.maximum(r2 - dist_sq, 0.0))
@@ -645,13 +653,19 @@ class DroneEnv(gym.Env):
         impact = np.where(valid, impact, np.inf)
         impact = np.where(impact < RAY_LENGTH, impact, np.inf)
 
-        dmin = impact.min(axis=0)  # (R,)
+        dmin = impact.min(axis=0)
         out = np.where(np.isfinite(dmin), dmin / RAY_LENGTH, 1.0).astype(np.float32)
         out = np.nan_to_num(out, nan=1.0, posinf=1.0, neginf=1.0)
         out = np.clip(out, 0.0, 1.0)
         return out
 
     def _get_observation(self):
+        """
+        Construct the observation vector.
+
+        Returns:
+            np.ndarray: Flattened observation [state, relative_enemy, lidar].
+        """
         obs = np.array([
             self.drone_vel[0] / MAX_SPEED,
             self.drone_vel[1] / MAX_SPEED,
@@ -661,18 +675,17 @@ class DroneEnv(gym.Env):
         ], dtype=np.float32)
 
         angles = self.ray_offsets + self.drone_angle
-        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float32)  # (R,2)
+        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float32)
 
         wall_d = self._ray_wall_dist(self.drone_pos, dirs)
         obs_d  = self._ray_circle_min_dist(self.drone_pos, dirs, self.obstacles_pos, self.obstacles_r)
         en_d   = self._ray_circle_min_dist(self.drone_pos, dirs, self.enemies_pos, self.enemies_r)
         fr_d   = self._ray_circle_min_dist(self.drone_pos, dirs, self.friends_pos, self.friends_r)
 
-        dist_mat = np.stack([wall_d, obs_d, en_d, fr_d], axis=0)  # (4,R)
+        dist_mat = np.stack([wall_d, obs_d, en_d, fr_d], axis=0)
         min_dist = dist_mat.min(axis=0)
         idx = dist_mat.argmin(axis=0)
 
-        # HARD sanitize (prevents NaN/Inf from ever reaching pygame math)
         min_dist = np.nan_to_num(min_dist, nan=1.0, posinf=1.0, neginf=1.0).astype(np.float32)
         min_dist = np.clip(min_dist, 0.0, 1.0)
 
@@ -690,7 +703,6 @@ class DroneEnv(gym.Env):
 
         lidar = np.concatenate([walls, obsts, enems, frnds], axis=0).astype(np.float32)
 
-        # closest enemy relative position (scaled)
         d = self.enemies_pos - self.drone_pos[None, :]
         dist2 = (d * d).sum(axis=1)
         ci = int(np.argmin(dist2))
@@ -699,15 +711,12 @@ class DroneEnv(gym.Env):
 
         out = np.concatenate([obs, rel_obs, lidar], axis=0).astype(np.float32)
 
-        # Only build ray segments if rendering
         if self.render_mode == "human":
             self.lidar_rays = []
             for i in range(NUM_RAYS):
                 ray_len_px = float(min_dist[i]) * RAY_LENGTH
                 start = self.drone_pos
                 end = start + dirs[i] * ray_len_px
-
-                # pygame is happiest with plain python tuples
                 start_t = (float(start[0]), float(start[1]))
                 end_t   = (float(end[0]), float(end[1]))
 
@@ -728,33 +737,30 @@ class DroneEnv(gym.Env):
         return out
 
     def render(self):
+        """
+        Render the environment using Pygame.
+        """
         if self.render_mode != "human":
             return
 
         self.screen.fill(BLACK)
 
-        # rays
         for start, end, color in self.lidar_rays:
             pygame.draw.line(self.screen, color, start, end, 1)
 
-        # obstacles
         for i in range(N_OBS):
             pygame.draw.circle(self.screen, GRAY, self.obstacles_pos[i].astype(int), int(self.obstacles_r[i]))
 
-        # enemies
         for i in range(N_EN):
             pygame.draw.circle(self.screen, RED, self.enemies_pos[i].astype(int), ENEMY_RADIUS)
 
-        # friendlies
         for i in range(N_FR):
             pygame.draw.circle(self.screen, GREEN, self.friends_pos[i].astype(int), FRIENDLY_RADIUS)
 
-        # last shot line
         if self.last_shot is not None:
             pygame.draw.line(self.screen, YELLOW, self.last_shot[0], self.last_shot[1], 3)
             self.last_shot = None
 
-        # drone
         dp = (float(self.drone_pos[0]), float(self.drone_pos[1]))
         pygame.draw.circle(self.screen, BLUE, (int(dp[0]), int(dp[1])), DRONE_RADIUS)
 
@@ -762,7 +768,6 @@ class DroneEnv(gym.Env):
         ep = (float(end_pos[0]), float(end_pos[1]))
         pygame.draw.line(self.screen, WHITE, dp, ep, 2)
 
-        # HUD
         pygame.draw.rect(self.screen, (20, 20, 20), (5, 5, 220, 110))
         pygame.draw.rect(self.screen, WHITE, (5, 5, 220, 110), 2)
         lines = [
@@ -780,6 +785,9 @@ class DroneEnv(gym.Env):
 
 
 def manual_control():
+    """
+    Run the environment with keyboard control for testing.
+    """
     if pygame is None:
         raise ImportError("pygame not installed. pip install pygame")
 

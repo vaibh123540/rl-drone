@@ -1,16 +1,14 @@
-# train.py
 import argparse
 import csv
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Generator, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
 from gymnasium.vector import SyncVectorEnv
 
 from environment import DroneEnv
@@ -19,6 +17,9 @@ from agent import ActorCritic
 
 @dataclass
 class PPOConfig:
+    """
+    Configuration parameters for PPO training.
+    """
     seed: int = 1
     total_timesteps: int = 200_000
     num_envs: int = 8
@@ -42,7 +43,20 @@ class PPOConfig:
 
 
 class RolloutBuffer:
-    def __init__(self, obs_dim, num_steps, num_envs, device):
+    """
+    Buffer to store transitions for PPO updates.
+    """
+
+    def __init__(self, obs_dim: int, num_steps: int, num_envs: int, device: torch.device):
+        """
+        Initialize the rollout buffer.
+
+        Args:
+            obs_dim (int): Dimension of observations.
+            num_steps (int): Number of steps per environment per rollout.
+            num_envs (int): Number of parallel environments.
+            device (torch.device): Computation device.
+        """
         self.obs = torch.zeros((num_steps, num_envs, obs_dim), device=device)
         self.actions = torch.zeros((num_steps, num_envs, 3), device=device)
         self.logprobs = torch.zeros((num_steps, num_envs), device=device)
@@ -57,7 +71,11 @@ class RolloutBuffer:
         self.T = num_steps
         self.N = num_envs
 
-    def add(self, obs, actions, logprobs, rewards, dones, values, shoot_mask):
+    def add(self, obs: torch.Tensor, actions: torch.Tensor, logprobs: torch.Tensor, 
+            rewards: torch.Tensor, dones: torch.Tensor, values: torch.Tensor, shoot_mask: torch.Tensor):
+        """
+        Add a transition to the buffer.
+        """
         t = self.ptr
         self.obs[t].copy_(obs)
         self.actions[t].copy_(actions)
@@ -68,7 +86,15 @@ class RolloutBuffer:
         self.shoot_mask[t].copy_(shoot_mask)
         self.ptr += 1
 
-    def compute_returns_advantages(self, last_value, gamma, lam):
+    def compute_returns_advantages(self, last_value: torch.Tensor, gamma: float, lam: float):
+        """
+        Compute GAE (Generalized Advantage Estimation).
+
+        Args:
+            last_value (torch.Tensor): Value estimate of the next state after rollout.
+            gamma (float): Discount factor.
+            lam (float): GAE smoothing parameter.
+        """
         last_gae = torch.zeros((self.N,), device=self.obs.device)
         for t in reversed(range(self.T)):
             next_nonterminal = 1.0 - self.dones[t]
@@ -81,7 +107,16 @@ class RolloutBuffer:
         adv = self.advantages
         self.advantages = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    def minibatches(self, mb_size):
+    def minibatches(self, mb_size: int) -> Generator:
+        """
+        Yield minibatches of data for PPO updates.
+
+        Args:
+            mb_size (int): Size of each minibatch.
+
+        Yields:
+            tuple: Tensors for obs, actions, logprobs, advantages, returns, values, and mask.
+        """
         T, N = self.T, self.N
         B = T * N
 
@@ -99,13 +134,25 @@ class RolloutBuffer:
             yield obs[mb], actions[mb], logprobs[mb], adv[mb], rets[mb], vals[mb], shoot_mask[mb]
 
 
-def make_env(seed, idx):
+def make_env(seed: int, idx: int):
+    """
+    Factory function for creating environment instances.
+    """
     def thunk():
-        return DroneEnv(render_mode=None, seed=seed + idx)  # headless
+        return DroneEnv(render_mode=None, seed=seed + idx)
     return thunk
 
 
-def pick_device(device_pref="auto"):
+def pick_device(device_pref: str = "auto") -> torch.device:
+    """
+    Select the computation device.
+
+    Args:
+        device_pref (str): Preference ("auto", "cpu", "cuda", "mps").
+
+    Returns:
+        torch.device: The selected device.
+    """
     if device_pref != "auto":
         return torch.device(device_pref)
     if torch.cuda.is_available():
@@ -116,10 +163,12 @@ def pick_device(device_pref="auto"):
 
 
 def ensure_dir(path: str):
+    """Ensure directory exists."""
     os.makedirs(path, exist_ok=True)
 
 
 def csv_write_row(path: str, row: Dict[str, Any]):
+    """Append a row to a CSV file."""
     file_exists = os.path.exists(path)
     with open(path, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(row.keys()))
@@ -129,33 +178,52 @@ def csv_write_row(path: str, row: Dict[str, Any]):
 
 
 def save_checkpoint(path: str, payload: Dict[str, Any]):
+    """Save training checkpoint."""
     torch.save(payload, path)
 
 
-def load_checkpoint(path, device):
-    # PyTorch 2.6+ defaults to weights_only=True, which blocks full checkpoints.
-    # This is safe IF you trust the checkpoint file (you created it).
+def load_checkpoint(path: str, device: torch.device) -> Dict[str, Any]:
+    """Load training checkpoint."""
     try:
         return torch.load(path, map_location=device, weights_only=False)
     except TypeError:
-        # older PyTorch versions don't have weights_only arg
         return torch.load(path, map_location=device)
 
 
 @torch.no_grad()
-def act_deterministic(policy: ActorCritic, obs_t: torch.Tensor, shoot_mask: torch.Tensor):
-    # mean actions => much more stable eval/plots
+def act_deterministic(policy: ActorCritic, obs_t: torch.Tensor, shoot_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Get deterministic actions for evaluation.
+
+    Args:
+        policy (ActorCritic): The policy network.
+        obs_t (torch.Tensor): Observation tensor.
+        shoot_mask (torch.Tensor): Shoot availability mask.
+
+    Returns:
+        tuple: Action tensor and value tensor.
+    """
     mu_t, _, mu_s, _, shoot_logit, value = policy.forward(obs_t)
     thrust = torch.sigmoid(mu_t)
     steer = torch.tanh(mu_s)
     shoot = (torch.sigmoid(shoot_logit) > 0.5).float() * shoot_mask
     action = torch.cat([thrust, steer, shoot], dim=-1)
-    # logprob not needed for eval
     return action, value
 
 
 @torch.no_grad()
-def evaluate(policy: ActorCritic, device, episodes=8):
+def evaluate(policy: ActorCritic, device: torch.device, episodes: int = 8) -> Tuple[float, float, float, List[int]]:
+    """
+    Run evaluation episodes.
+
+    Args:
+        policy (ActorCritic): The policy network.
+        device (torch.device): Computation device.
+        episodes (int): Number of episodes to run.
+
+    Returns:
+        tuple: Mean score, std score, mean length, list of termination codes.
+    """
     env = DroneEnv(render_mode=None, seed=999)
     scores = []
     lengths = []
@@ -190,6 +258,9 @@ def evaluate(policy: ActorCritic, device, episodes=8):
 
 
 def plot_from_csv(csv_path: str, out_png_path: str):
+    """
+    Generate training plots from CSV log.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -222,7 +293,6 @@ def plot_from_csv(csv_path: str, out_png_path: str):
 
     fig = plt.figure(figsize=(10, 10))
 
-    # 1) Returns
     ax1 = plt.subplot(4, 1, 1)
     ax1.plot(upd, ep_ema, label="Train episode return (EMA)")
     ax1.plot(upd, eval_mean, label="Eval return (deterministic)")
@@ -231,14 +301,12 @@ def plot_from_csv(csv_path: str, out_png_path: str):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # 2) Episode length
     ax2 = plt.subplot(4, 1, 2)
     ax2.plot(upd, ep_len_ema, label="Train episode length (EMA)")
     ax2.set_ylabel("Ep length")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    # 3) Termination breakdown (per update, counts)
     ax3 = plt.subplot(4, 1, 3)
     ax3.plot(upd, wall, label="wall")
     ax3.plot(upd, obst, label="obstacle")
@@ -249,7 +317,6 @@ def plot_from_csv(csv_path: str, out_png_path: str):
     ax3.legend(ncol=3)
     ax3.grid(True, alpha=0.3)
 
-    # 4) Speed + shooting
     ax4 = plt.subplot(4, 1, 4)
     ax4.plot(upd, sps, label="SPS")
     ax4.plot(upd, hit_rate, label="Shot hit rate")
@@ -263,6 +330,9 @@ def plot_from_csv(csv_path: str, out_png_path: str):
 
 
 def main():
+    """
+    Main training loop.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--total-timesteps", type=int, default=150_000)
     parser.add_argument("--num-envs", type=int, default=8)
@@ -297,7 +367,6 @@ def main():
     device = pick_device(cfg.device)
     print("Device:", device)
 
-    # infer obs_dim
     tmp = DroneEnv(render_mode=None, seed=cfg.seed)
     obs_dim = int(tmp.observation_space.shape[0])
     tmp.close()
@@ -332,11 +401,9 @@ def main():
     num_updates = cfg.total_timesteps // batch_size
     print(f"Batch/update: {batch_size} | Target updates: {num_updates} | Starting at: {start_update}")
 
-    # episode trackers
     ep_returns = np.zeros(cfg.num_envs, dtype=np.float32)
     ep_lengths = np.zeros(cfg.num_envs, dtype=np.int32)
 
-    # EMA trackers (so you always see a stable curve)
     ema_return = -100.0
     ema_len = 200.0
     ema_beta = 0.90
@@ -349,14 +416,12 @@ def main():
         ended_eps_returns: List[float] = []
         ended_eps_lengths: List[int] = []
 
-        # per-update counters
-        term_counts = np.zeros(6, dtype=np.int32)  # by term_code 0..5
+        term_counts = np.zeros(6, dtype=np.int32)
         shots_fired = 0
         shots_hit = 0
         shots_hit_friendly = 0
         shots_missed = 0
 
-        # rollout
         for _ in range(cfg.num_steps):
             cooldown_norm = obs_t[:, 4:5]
             shoot_mask = (cooldown_norm <= 1e-6).float()
@@ -367,12 +432,10 @@ def main():
             next_obs, rewards, terms, truncs, infos = envs.step(actions.cpu().numpy().astype(np.float32))
             dones = np.logical_or(terms, truncs)
 
-            # info extraction (works if you applied env patch; otherwise defaults to zeros)
             if isinstance(infos, dict):
                 tc = infos.get("term_code", None)
                 if tc is not None:
                     tc = np.asarray(tc, dtype=np.int32)
-                    # if env returns scalar per env, this is shape (num_envs,)
                     for code in tc:
                         if 0 <= int(code) <= 5:
                             term_counts[int(code)] += 1
@@ -382,7 +445,6 @@ def main():
                 shots_hit_friendly += int(np.sum(np.asarray(infos.get("shot_hit_friendly", 0), dtype=np.int32)))
                 shots_missed += int(np.sum(np.asarray(infos.get("shot_missed", 0), dtype=np.int32)))
 
-            # episodic bookkeeping
             ep_returns += rewards.astype(np.float32)
             ep_lengths += 1
             if np.any(dones):
@@ -405,13 +467,11 @@ def main():
 
             obs_t = torch.tensor(next_obs, dtype=torch.float32, device=device)
 
-        # bootstrap
         with torch.no_grad():
             last_value = policy.get_value(obs_t)
 
         buffer.compute_returns_advantages(last_value, cfg.gamma, cfg.gae_lambda)
 
-        # PPO update
         policy.train()
         mb_count = max(1, batch_size // cfg.minibatch_size)
 
@@ -467,11 +527,9 @@ def main():
             ema_return = ema_beta * ema_return + (1 - ema_beta) * mean_ep_r
             ema_len = ema_beta * ema_len + (1 - ema_beta) * mean_ep_len
 
-        # hit rate
         shot_hit_rate = (shots_hit / max(1, shots_fired))
         friendly_rate = (shots_hit_friendly / max(1, shots_fired))
 
-        # periodic deterministic eval
         eval_mean = ""
         eval_std = ""
         eval_len = ""
@@ -492,7 +550,6 @@ def main():
                 "best_eval": best_eval,
             })
 
-        # log CSV every update
         row = {
             "update": update,
             "seen_steps": total_seen_steps,
@@ -527,7 +584,6 @@ def main():
         }
         csv_write_row(log_path, row)
 
-        # improved terminal line
         term_str = f"W{term_counts[1]} O{term_counts[2]} F{term_counts[3]} E{term_counts[4]} T{term_counts[5]}"
         shot_str = f"shots {shots_fired} hit {shots_hit} ff {shots_hit_friendly} hr {shot_hit_rate:.2f}"
         eval_str = f" eval {float(eval_mean):+.1f}±{float(eval_std):.1f} len {float(eval_len):.0f} best {best_eval:+.1f}" if eval_mean else ""
@@ -539,7 +595,6 @@ def main():
 
     envs.close()
 
-    # plot at end
     try:
         plot_from_csv(log_path, plot_path)
         print("Saved plot:", plot_path)

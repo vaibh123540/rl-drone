@@ -6,14 +6,19 @@ import torch
 from environment import DroneEnv
 from agent import ActorCritic
 
-# Optional pygame (only used for event pump when render_mode="human")
 try:
     import pygame
 except ImportError:
     pygame = None
 
 
-def pick_device():
+def pick_device() -> torch.device:
+    """
+    Select the best available computation device (CUDA, MPS, or CPU).
+
+    Returns:
+        torch.device: The selected device.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -22,10 +27,20 @@ def pick_device():
 
 
 @torch.no_grad()
-def deterministic_action(policy: ActorCritic, obs: np.ndarray, device):
+def deterministic_action(policy: ActorCritic, obs: np.ndarray, device: torch.device) -> np.ndarray:
+    """
+    Select the best action based on the policy (greedy/deterministic).
+
+    Args:
+        policy (ActorCritic): The trained policy network.
+        obs (np.ndarray): The current observation vector.
+        device (torch.device): The computation device.
+
+    Returns:
+        np.ndarray: The selected action [thrust, steer, shoot].
+    """
     obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
-    # cooldown is obs[4] in your codebase
     can_shoot = 1.0 if obs[4] <= 1e-6 else 0.0
     shoot_mask = torch.tensor([[can_shoot]], dtype=torch.float32, device=device)
 
@@ -39,7 +54,18 @@ def deterministic_action(policy: ActorCritic, obs: np.ndarray, device):
 
 
 @torch.no_grad()
-def stochastic_action(policy: ActorCritic, obs: np.ndarray, device):
+def stochastic_action(policy: ActorCritic, obs: np.ndarray, device: torch.device) -> np.ndarray:
+    """
+    Sample an action from the policy distribution (stochastic).
+
+    Args:
+        policy (ActorCritic): The trained policy network.
+        obs (np.ndarray): The current observation vector.
+        device (torch.device): The computation device.
+
+    Returns:
+        np.ndarray: The sampled action [thrust, steer, shoot].
+    """
     obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
     can_shoot = 1.0 if obs[4] <= 1e-6 else 0.0
     shoot_mask = torch.tensor([[can_shoot]], dtype=torch.float32, device=device)
@@ -48,6 +74,15 @@ def stochastic_action(policy: ActorCritic, obs: np.ndarray, device):
 
 
 def term_code_to_text(code: int) -> str:
+    """
+    Convert a termination code integer to a readable string.
+
+    Args:
+        code (int): The termination code from the environment.
+
+    Returns:
+        str: Description of the termination reason.
+    """
     return {
         0: "none",
         1: "wall",
@@ -60,12 +95,14 @@ def term_code_to_text(code: int) -> str:
 
 def pump_pygame_events() -> bool:
     """
-    Returns False if user requested quit, True otherwise.
+    Process Pygame events to keep the window responsive and handle quit requests.
+
+    Returns:
+        bool: False if the user requested to quit, True otherwise.
     """
     if pygame is None:
         return True
 
-    # If pygame isn't initialized by env yet, don't touch it.
     if not pygame.get_init():
         return True
 
@@ -79,18 +116,19 @@ def pump_pygame_events() -> bool:
 
 
 def main():
+    """
+    Main loop for running the trained agent in the environment.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, default="runs/drone_ppo_weights.pt")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions (more chaotic)")
     parser.add_argument("--fps", type=int, default=60, help="Render FPS cap")
+    parser.add_argument("--no-lidar", action="store_true", help="Hide LiDAR rays")
     args = parser.parse_args()
 
     device = pick_device()
 
-    # Note: If your DroneEnv has a strict internal counter that stops physics
-    # after 1000 steps, you might need to modify DroneEnv as well.
-    # But usually, just ignoring the reset here works.
     env = DroneEnv(render_mode="human", seed=args.seed)
     obs_dim = int(env.observation_space.shape[0])
 
@@ -113,10 +151,13 @@ def main():
     print("Playing continuously (Infinite Horizon).")
     print(" - TIMEOUTS are ignored (game continues)")
     print(" - Resets only on CRASH/DEATH")
+    print(f" - LiDAR: {'HIDDEN' if args.no_lidar else 'VISIBLE'}")
     print("Press ESC/Q or close the window to quit.")
 
-    # show first frame immediately
+    # Show first frame immediately
     try:
+        if args.no_lidar:
+            env.lidar_rays = []
         env.render()
     except Exception:
         pass
@@ -126,7 +167,6 @@ def main():
 
     running = True
     while running:
-        # pygame event pump (prevents 'not responding' + allows quitting)
         if not pump_pygame_events():
             break
 
@@ -140,21 +180,17 @@ def main():
         seg_return += float(r)
         total_steps += 1
 
-        # render every step
         try:
+            if args.no_lidar:
+                env.lidar_rays = []
             env.render()
         except Exception:
             pass
 
-        # --- CHANGE IS HERE ---
-        # We simply ignore 'truncated' (timeout).
-        # We only print a log if it happens, but we DO NOT reset.
+        # Ignore truncation (timeout) to allow continuous play
         if truncated and not terminated:
-            # Optional: Uncomment the line below if you want to see when 1000 steps pass
-            # print(f"[Info] Passed step limit at {total_steps}, continuing...")
             pass 
 
-        # If crash/terminated: reset (DON'T break) so window stays open
         if terminated:
             code = info.get("term_code", 0) if isinstance(info, dict) else 0
             print(
@@ -165,7 +201,7 @@ def main():
             segment += 1
             seg_return = 0.0
 
-        # FPS cap
+        # Precise FPS capping
         now = time.perf_counter()
         if now < next_t:
             time.sleep(next_t - now)
